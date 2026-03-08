@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Compressed Brain MCP: 12-tool knowledge graph with Hebbian learning, hybrid search, error memory, and anti-hallucination grounding. PostgreSQL backend."
 requires-python = ">=3.11"
 dependencies = ["asyncpg>=0.30.0"]
-license = {text = "MIT"}
+license = {text = "CC-BY-NC-4.0"}
 readme = "README.md"
 keywords = ["mcp", "memory", "knowledge-graph", "hebbian", "ai-agent"]
 

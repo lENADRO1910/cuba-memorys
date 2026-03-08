@@ -298,7 +298,7 @@ Access: importance resets and Oja-boosts back up
 
 ## License
 
-MIT
+[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — Free to use and modify, **not for commercial use**.
 
 ---
 
