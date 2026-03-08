@@ -1,0 +1,31 @@
+# Cuba-Memorys — PostgreSQL dedicado
+# Independiente del proyecto del usuario. Auto-start con Docker.
+name: cuba-memorys
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: cuba-memorys-db
+    restart: always
+    environment:
+      POSTGRES_USER: cuba
+      POSTGRES_PASSWORD: memorys2026
+      POSTGRES_DB: brain
+    ports:
+      - "5488:5432"  # Puerto único para evitar conflictos
+    volumes:
+      - cuba_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cuba -d brain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  cuba_data:
+    name: cuba-memorys-pgdata
