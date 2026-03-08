@@ -9,3 +9,5 @@ build/
 *.egg
 venv/
 .venv/
+uv.lock
+.venv/
