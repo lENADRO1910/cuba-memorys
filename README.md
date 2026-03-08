@@ -302,8 +302,13 @@ MIT
 
 ---
 
-## Credits
+## Author
 
-Built with 🧠 by [@lENADRO1910](https://github.com/lENADRO1910)
+**Leandro Pérez G.**
+
+- GitHub: [@lENADRO1910](https://github.com/lENADRO1910)
+- Email: [leandropatodo@gmail.com](mailto:leandropatodo@gmail.com)
+
+## Credits
 
 Mathematical foundations: Oja (1982), Ebbinghaus (1885), Collins & Loftus (1975)
