@@ -126,6 +126,8 @@ CREATE INDEX IF NOT EXISTS idx_obs_active_search
     WHERE observation_type != 'superseded';
 
 -- HNSW index for ANN vector search — O(log n) cosine similarity
+-- m=16: connections/node (optimal for 384d BGE-small)
+-- ef_construction=128: build quality (Google Cloud + pgvector benchmarks 2025)
 CREATE INDEX IF NOT EXISTS idx_obs_embedding_hnsw
     ON brain_observations USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+    WITH (m = 16, ef_construction = 128);

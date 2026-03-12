@@ -5,7 +5,7 @@
 //! V8: Graceful degradation — if vector search fails, fallback to text.
 //! VF2: Testing Effect — search matches boost retrieval_strength.
 
-use crate::constants::RRF_K;
+use crate::constants::{RRF_K_MIN, RRF_K_MAX};
 use crate::cognitive::dual_strength;
 use anyhow::Result;
 use serde_json::Value;
@@ -35,12 +35,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// §A: Weighted RRF Entropy Routing — fuses text + vector search.
+/// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
 async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Result<Value> {
-    // Determine search weight from query entropy (§A)
+    // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = compute_query_entropy(query);
-    let text_weight = if query_entropy > 3.0 { 0.6 } else { 0.4 };
-    let vector_weight = 1.0 - text_weight;
+    let (text_weight, vector_weight) = entropy_weights(query_entropy);
 
     // Run text search (always available — V8 graceful degradation base)
     let text_results = text_search(pool, query, scope, limit * 2).await?;
@@ -48,13 +47,18 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
     // Run vector search (may fail gracefully — V8)
     let vector_results = vector_search(pool, query, scope, limit * 2).await;
 
-    // RRF Fusion with entropy-weighted scores
+    // P3: Adaptive RRF k — scales with result count (Azure AI Search 2025)
+    let total_results = text_results.len()
+        + vector_results.as_ref().map(|v| v.len()).unwrap_or(0);
+    let rrf_k = adaptive_rrf_k(total_results);
+
+    // RRF Fusion with entropy-weighted scores and adaptive k
     let mut fused_scores: HashMap<String, (f64, Value)> = HashMap::new();
 
     // Add text results with RRF rank score
     for (rank, result) in text_results.iter().enumerate() {
         let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let rrf_score = text_weight / (RRF_K + rank as f64 + 1.0);
+        let rrf_score = text_weight / (rrf_k + rank as f64 + 1.0);
         fused_scores.insert(id, (rrf_score, result.clone()));
     }
 
@@ -62,7 +66,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
     if let Ok(vec_results) = vector_results {
         for (rank, result) in vec_results.iter().enumerate() {
             let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let rrf_score = vector_weight / (RRF_K + rank as f64 + 1.0);
+            let rrf_score = vector_weight / (rrf_k + rank as f64 + 1.0);
             fused_scores
                 .entry(id.clone())
                 .and_modify(|(score, _)| *score += rrf_score)
@@ -130,6 +134,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
             "query_entropy": query_entropy,
             "text_weight": text_weight,
             "vector_weight": vector_weight,
+            "rrf_k": rrf_k,
             "session_aware": !session_boost.is_empty()
         }
     }))
@@ -350,6 +355,31 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
 }
 
 // ── Utility Functions ───────────────────────────────────────────
+
+/// §A V2: 3-range entropy routing (Elastic Search Labs, 2025).
+///
+/// | Entropy | Query Type | text | vector |
+/// |---------|------------|------|--------|
+/// | < 2.0   | Keyword    | 0.7  | 0.3    |
+/// | 2.0-3.5 | Mixed      | 0.5  | 0.5    |
+/// | > 3.5   | Semantic   | 0.3  | 0.7    |
+fn entropy_weights(entropy: f64) -> (f64, f64) {
+    if entropy < 2.0 {
+        (0.7, 0.3) // Keyword-heavy: prefer text match
+    } else if entropy <= 3.5 {
+        (0.5, 0.5) // Balanced: equal weight
+    } else {
+        (0.3, 0.7) // Semantic-heavy: prefer vector search
+    }
+}
+
+/// P3: Adaptive RRF k — scales with result count (Azure AI Search 2025).
+///
+/// With few results (< 20), a lower k prioritizes top-ranked items.
+/// With many results (> 120), k = 60 maintains stability.
+fn adaptive_rrf_k(result_count: usize) -> f64 {
+    (result_count as f64 * 0.5).clamp(RRF_K_MIN, RRF_K_MAX)
+}
 
 /// §A: Compute query entropy for RRF weighting.
 fn compute_query_entropy(query: &str) -> f64 {

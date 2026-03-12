@@ -55,8 +55,15 @@ pub const STORAGE_STRENGTH_INCREMENT: f64 = 0.1;
 pub const RETRIEVAL_DECAY_FACTOR: f64 = 0.95;
 pub const RETRIEVAL_SEARCH_BOOST: f64 = 0.05; // VF2: Testing Effect
 
-/// RRF (Reciprocal Rank Fusion) constant.
+/// FSRS-6 w20: Default decay rate (Expertium 2025).
+/// Range [0.1, 0.8]. Adaptive per-entity via sigmoid(access_count).
+pub const DEFAULT_DECAY_RATE: f64 = 0.5;
+
+/// RRF (Reciprocal Rank Fusion) constants.
+/// V5: Adaptive k — scales with result count (Azure AI Search 2025).
 pub const RRF_K: f64 = 60.0;
+pub const RRF_K_MIN: f64 = 10.0;
+pub const RRF_K_MAX: f64 = 60.0;
 
 /// Relation types.
 pub const VALID_RELATION_TYPES: &[&str] = &[

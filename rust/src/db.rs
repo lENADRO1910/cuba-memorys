@@ -86,6 +86,11 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
 
     if pgvector_check.is_some() {
         tracing::info!("pgvector extension detected");
+        // P4: Set ef_search=100 for better recall (default 40, pgvector benchmarks 2025)
+        sqlx::query("SET hnsw.ef_search = 100")
+            .execute(pool)
+            .await
+            .ok(); // Non-fatal if setting not supported
     } else {
         tracing::warn!("pgvector extension NOT found — vector search disabled");
     }
