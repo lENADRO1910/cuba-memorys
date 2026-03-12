@@ -6,9 +6,10 @@
 //! V5: Prediction Error Gating — classify by similarity.
 
 use crate::constants::{
-    DEDUP_THRESHOLD, PRED_ERROR_REINFORCE,
+    DEDUP_THRESHOLD,
     VALID_OBSERVATION_TYPES, VALID_SOURCES,
 };
+use crate::cognitive::prediction_error;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -295,7 +296,7 @@ enum DedupResult {
     Reinforce(uuid::Uuid),
 }
 
-/// Check for near-duplicates using pg_trgm similarity.
+/// Check for near-duplicates using pg_trgm similarity + adaptive PE gating (V5.1).
 async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Result<DedupResult> {
     let dupes: Vec<(uuid::Uuid, String, f64)> = sqlx::query_as(
         "SELECT id, content, similarity(content, $2)::float8 AS sim
@@ -308,16 +309,40 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
     .fetch_all(pool)
     .await?;
 
+    if dupes.is_empty() {
+        return Ok(DedupResult::Unique);
+    }
+
+    // V5.1: Fetch recent similarities for adaptive thresholds
+    let recent_sims: Vec<(f64,)> = sqlx::query_as(
+        "SELECT similarity(content, $2)::float8
+         FROM brain_observations
+         WHERE entity_id = $1 AND observation_type != 'superseded'
+         ORDER BY created_at DESC LIMIT 20"
+    )
+    .bind(entity_id)
+    .bind(content)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let recent: Vec<f64> = recent_sims.iter().map(|(s,)| *s).collect();
+
     for (obs_id, existing_content, sim) in &dupes {
         let sim = *sim;
         if sim > DEDUP_THRESHOLD {
             return Ok(DedupResult::Duplicate(existing_content[..80.min(existing_content.len())].to_string()));
         }
-        // V5: Prediction Error Gating
-        if sim > PRED_ERROR_REINFORCE {
-            return Ok(DedupResult::Reinforce(*obs_id));
+        // V5.1: Adaptive PE gating (Friston, Nature 2023)
+        let action = prediction_error::adaptive_gate(sim, &recent);
+        match action {
+            prediction_error::GatingAction::Reinforce => {
+                return Ok(DedupResult::Reinforce(*obs_id));
+            }
+            prediction_error::GatingAction::Update | prediction_error::GatingAction::Create => {
+                // Allow as new observation
+            }
         }
-        // Between PRED_ERROR_UPDATE and PRED_ERROR_REINFORCE: allow as update (new observation)
     }
 
     Ok(DedupResult::Unique)

@@ -31,12 +31,27 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(serde_json::json!({"metric": "drift", "error_distribution": drift}))
         }
         "communities" => {
-            // Simplified community detection via connected components
-            let components: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT e.entity_type, COUNT(*) FROM brain_entities e GROUP BY e.entity_type ORDER BY COUNT(*) DESC"
-            ).fetch_all(pool).await?;
-            let communities: Vec<Value> = components.iter().map(|(t, c)| serde_json::json!({"type": t, "size": c})).collect();
-            Ok(serde_json::json!({"metric": "communities", "communities": communities}))
+            // Leiden community detection (Traag et al., Nature 2019)
+            match crate::graph::community::detect(pool).await {
+                Ok(communities) => {
+                    let community_json: Vec<Value> = communities.iter().map(|(id, members)| {
+                        serde_json::json!({
+                            "community_id": id,
+                            "size": members.len(),
+                            "members": members
+                        })
+                    }).collect();
+                    Ok(serde_json::json!({"metric": "communities", "algorithm": "leiden", "communities": community_json, "count": community_json.len()}))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Leiden community detection failed, using fallback");
+                    let components: Vec<(String, i64)> = sqlx::query_as(
+                        "SELECT e.entity_type, COUNT(*) FROM brain_entities e GROUP BY e.entity_type ORDER BY COUNT(*) DESC"
+                    ).fetch_all(pool).await?;
+                    let communities: Vec<Value> = components.iter().map(|(t, c)| serde_json::json!({"type": t, "size": c})).collect();
+                    Ok(serde_json::json!({"metric": "communities", "algorithm": "fallback_groupby", "communities": communities}))
+                }
+            }
         }
         "bridges" => {
             // Entities with highest betweenness (most connections across communities)
