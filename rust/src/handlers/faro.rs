@@ -95,11 +95,10 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
         })
         .collect();
 
-    if !matched_obs_ids.is_empty() {
-        if let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await {
+    if !matched_obs_ids.is_empty()
+        && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await {
             tracing::warn!(error = %e, "failed to apply Testing Effect boost");
         }
-    }
 
     // Session awareness: check active session and boost matching results
     let session_boost = get_session_goals(pool).await.unwrap_or_default();

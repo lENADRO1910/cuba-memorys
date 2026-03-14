@@ -19,16 +19,9 @@ use sqlx::PgPool;
 /// Range: [0.0, 2.0]. Default: 0.5. Set to 0.0 to disable.
 const TOPO_INERTIA_GAMMA: f64 = 0.5;
 
-/// FSRS-6 default decay constant.
-#[allow(dead_code)]
-const DECAY: f64 = -0.5;
-/// FSRS-6 factor derived from decay constant.
-#[allow(dead_code)]
-const FACTOR: f64 = 0.9f64; // 19.0 / 81.0 precomputed below
-
 /// Calculate retrievability from stability and elapsed days.
 ///
-/// Formula: R(t, S) = (1 + FACTOR * t / S)^(-decay_rate)
+/// Formula: R(t, S) = (1 + (19/81) * t / S)^(-decay_rate)
 ///
 /// V5: decay_rate is now personalizable per entity (w20 in FSRS-6).
 pub fn retrievability(stability: f64, elapsed_days: f64) -> f64 {

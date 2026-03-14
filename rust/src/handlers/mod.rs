@@ -14,6 +14,7 @@ pub mod decreto;
 pub mod eco;
 pub mod expediente;
 pub mod faro;
+pub mod forget;
 pub mod jornada;
 pub mod puente;
 pub mod remedio;
@@ -36,6 +37,7 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
         "cuba_alma" => alma::handle(pool, args).await?,
         "cuba_cronica" => cronica::handle(pool, args).await?,
         "cuba_faro" => faro::handle(pool, args).await?,
+        "cuba_forget" => forget::handle(pool, args).await?,
         "cuba_puente" => puente::handle(pool, args).await?,
         "cuba_eco" => eco::handle(pool, args).await?,
         "cuba_alarma" => alarma::handle(pool, args).await?,

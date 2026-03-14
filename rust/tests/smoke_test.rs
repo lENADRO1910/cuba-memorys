@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 #[test]
 fn test_all_tools_defined() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
-    assert_eq!(tools.len(), 12, "Expected 12 MCP tools, got {}", tools.len());
+    assert_eq!(tools.len(), 13, "Expected 13 MCP tools, got {}", tools.len());
 
     let tool_names: Vec<&str> = tools.iter()
         .filter_map(|t: &Value| t.get("name").and_then(|n: &Value| n.as_str()))

@@ -201,7 +201,7 @@ fn refine_communities(neighbors: &[Vec<(usize, f64)>], labels: &mut [usize]) {
 
     let mut next_label = labels.iter().copied().max().unwrap_or(0) + 1;
 
-    for (_comm_id, members) in &community_members {
+    for members in community_members.values() {
         if members.len() <= 1 {
             continue; // Single-node communities are trivially connected
         }

@@ -211,6 +211,14 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["action"]
         })),
+        tool_def("cuba_forget", "GDPR Right to Erasure: cascading hard-delete of an entity and ALL references across observations, relations, errors, and sessions. IRREVERSIBLE. Requires confirm=true.", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "entity_name": {"type": "string", "description": "Entity name to erase completely"},
+                "confirm": {"type": "boolean", "description": "Must be true to proceed (safety gate)"}
+            },
+            "required": ["entity_name", "confirm"]
+        })),
     ]
 }
 

@@ -134,12 +134,11 @@ async fn drift(pool: &PgPool) -> Result<Value> {
     let mut categories = 0u32;
 
     for (error_type, observed) in &recent {
-        if let Some(&expected) = hist_map.get(error_type) {
-            if expected > 0.0 {
+        if let Some(&expected) = hist_map.get(error_type)
+            && expected > 0.0 {
                 chi_squared += (*observed as f64 - expected).powi(2) / expected;
                 categories += 1;
             }
-        }
     }
 
     let df = (categories as i32 - 1).max(1);

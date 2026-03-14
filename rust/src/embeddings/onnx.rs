@@ -134,11 +134,10 @@ fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
 pub async fn embed(text: &str) -> Result<Vec<f32>> {
     // Check cache first
     let cache_key = text.to_string();
-    if let Ok(mut cache) = get_cache().lock() {
-        if let Some(cached) = cache.get(&cache_key) {
+    if let Ok(mut cache) = get_cache().lock()
+        && let Some(cached) = cache.get(&cache_key) {
             return Ok(cached);
         }
-    }
 
     // FIX B2: spawn_blocking for CPU-bound work
     let text_owned = text.to_string();
@@ -231,7 +230,7 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
     if shape.len() != 3 || shape[2] as usize != EMBEDDING_DIM {
         return Err(anyhow::anyhow!(
             "unexpected output shape: {:?}, expected [1, {}, {}]",
-            &*shape, seq_len, EMBEDDING_DIM
+            shape, seq_len, EMBEDDING_DIM
         ));
     }
 
