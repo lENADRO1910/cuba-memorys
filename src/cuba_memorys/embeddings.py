@@ -41,11 +41,13 @@ def _ensure_model() -> bool:
             repo_id=MODEL_REPO,
             filename="model_quantized.onnx",
             cache_dir=str(MODEL_DIR),
+            revision="main",  # B615: pin revision (supply chain)
         )
         tokenizer_path = hf_hub_download(
             repo_id=MODEL_REPO,
             filename="tokenizer.json",
             cache_dir=str(MODEL_DIR),
+            revision="main",  # B615: pin revision (supply chain)
         )
 
         sess_options = ort.SessionOptions()
@@ -126,7 +128,7 @@ async def embed_async(texts: list[str]) -> np.ndarray:
     blocks the async event loop, violating cooperative scheduling.
     """
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, embed, texts)
 
 

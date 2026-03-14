@@ -1,5 +1,4 @@
-//! Graph module — PageRank, community detection, centrality.
-#![allow(dead_code)]
+//! Graph module — PageRank, community detection, betweenness centrality.
 
 pub mod centrality;
 pub mod community;

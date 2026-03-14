@@ -126,7 +126,7 @@ fn test_threshold_invariants() {
     );
     assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
     assert!(HEBBIAN_MAX_IMPORTANCE <= 1.0);
-    assert!(RRF_K > 0.0);
+    // V4: RRF_K removed from public constants — now k=60 inline in rrf.rs/faro.rs
     assert_eq!(FSRS6_DEFAULT_PARAMS.len(), 21);
 }
 

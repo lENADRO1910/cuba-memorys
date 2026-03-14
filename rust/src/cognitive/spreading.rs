@@ -1,16 +1,23 @@
-//! §C: Random Walk with Restart (RWR) Spreading Activation.
+//! §C: Neighbor Diffusion — 1-hop importance spreading.
 //!
-//! Collins & Loftus (1975) spreading activation via RWR.
-//! Runs in REM sleep daemon as background consolidation.
+//! Collins & Loftus (1975) spreading activation, simplified to single-hop
+//! weighted diffusion. Runs in REM sleep daemon as background consolidation.
+//!
+//! NOTE: This is NOT a full Random Walk with Restart (which iterates to
+//! convergence like PageRank). For topology-aware importance, see
+//! `graph::pagerank::compute_and_store`.
 
 use anyhow::Result;
 use sqlx::PgPool;
 
-/// §C: RWR-based spreading activation during REM consolidation.
+/// 1-hop weighted diffusion during REM consolidation.
 ///
-/// For each high-importance entity, diffuse importance to neighbors
-/// via random walk with restart (α=0.85, 20 iterations).
-pub async fn spreading_activation(pool: &PgPool) -> Result<()> {
+/// For each high-importance entity (seed), diffuse a fraction of its
+/// importance to direct neighbors, weighted by relation strength.
+///
+/// - α=0.85: restart probability (fraction kept by seed)
+/// - (1−α)=0.15: fraction diffused to neighbors
+pub async fn neighbor_diffusion(pool: &PgPool) -> Result<()> {
     // Get seed entities (high importance)
     let seeds: Vec<(uuid::Uuid, f64)> = sqlx::query_as(
         "SELECT id, importance FROM brain_entities
@@ -25,7 +32,7 @@ pub async fn spreading_activation(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
 
-    // For each seed, run RWR and boost neighbors
+    // For each seed, diffuse importance to direct neighbors
     for (seed_id, seed_importance) in &seeds {
         // Get direct neighbors
         let neighbors: Vec<(uuid::Uuid, f64)> = sqlx::query_as(
@@ -61,6 +68,6 @@ pub async fn spreading_activation(pool: &PgPool) -> Result<()> {
         }
     }
 
-    tracing::info!(seeds = seeds.len(), "RWR spreading activation completed");
+    tracing::info!(seeds = seeds.len(), "neighbor diffusion completed");
     Ok(())
 }

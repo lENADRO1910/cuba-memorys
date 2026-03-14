@@ -1,8 +1,40 @@
 //! Handler: cuba_expediente — Search past errors/solutions.
+//!
+//! FIX A-001: SQL injection remediated — all queries use parameterized binds.
+//! FIX A-002: UTF-8 safe truncation via zafra::safe_truncate.
+//! FIX A-007: Complex tuple replaced with named struct.
 
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
+
+use super::zafra::safe_truncate;
+
+/// Named result struct replacing bare tuple (FIX A-007: clippy::type_complexity).
+struct ErrorRow {
+    id: uuid::Uuid,
+    error_type: String,
+    error_message: String,
+    solution: Option<String>,
+    resolved: bool,
+    project: String,
+    sim: f64,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ErrorRow {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            error_type: row.try_get("error_type")?,
+            error_message: row.try_get("error_message")?,
+            solution: row.try_get("solution")?,
+            resolved: row.try_get("resolved")?,
+            project: row.try_get("project")?,
+            sim: row.try_get("sim")?,
+        })
+    }
+}
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -14,25 +46,72 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("query is required");
     }
 
-    // Search errors
-    let mut sql = String::from(
-        "SELECT id, error_type, error_message, solution, resolved, project,
-                similarity(error_message, $1)::float8 AS sim
-         FROM brain_errors
-         WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)"
-    );
+    // FIX A-001: Parameterized query builder — eliminates CWE-89 SQL injection.
+    // All user-supplied values use $N bind parameters instead of format!().
+    let errors = if let Some(proj) = project {
+        if resolved_only {
+            sqlx::query_as::<_, ErrorRow>(
+                "SELECT id, error_type, error_message, solution, resolved, project,
+                        similarity(error_message, $1)::float8 AS sim
+                 FROM brain_errors
+                 WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+                   AND resolved = true
+                   AND project = $2
+                 ORDER BY sim DESC LIMIT 20"
+            )
+            .bind(query)
+            .bind(proj)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, ErrorRow>(
+                "SELECT id, error_type, error_message, solution, resolved, project,
+                        similarity(error_message, $1)::float8 AS sim
+                 FROM brain_errors
+                 WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+                   AND project = $2
+                 ORDER BY sim DESC LIMIT 20"
+            )
+            .bind(query)
+            .bind(proj)
+            .fetch_all(pool)
+            .await?
+        }
+    } else if resolved_only {
+        sqlx::query_as::<_, ErrorRow>(
+            "SELECT id, error_type, error_message, solution, resolved, project,
+                    similarity(error_message, $1)::float8 AS sim
+             FROM brain_errors
+             WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+               AND resolved = true
+             ORDER BY sim DESC LIMIT 20"
+        )
+        .bind(query)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, ErrorRow>(
+            "SELECT id, error_type, error_message, solution, resolved, project,
+                    similarity(error_message, $1)::float8 AS sim
+             FROM brain_errors
+             WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+             ORDER BY sim DESC LIMIT 20"
+        )
+        .bind(query)
+        .fetch_all(pool)
+        .await?
+    };
 
-    if resolved_only { sql.push_str(" AND resolved = true"); }
-    if let Some(p) = project { sql.push_str(&format!(" AND project = '{}'", p.replace('\'', "''"))); }
-    sql.push_str(" ORDER BY sim DESC LIMIT 20");
-
-    let errors: Vec<(uuid::Uuid, String, String, Option<String>, bool, String, f64)> =
-        sqlx::query_as(&sql).bind(query).fetch_all(pool).await?;
-
-    let results: Vec<Value> = errors.iter().map(|(id, et, em, sol, res, proj, sim)| {
+    // FIX A-002: safe_truncate prevents panic on multi-byte UTF-8
+    let results: Vec<Value> = errors.iter().map(|row| {
         serde_json::json!({
-            "id": id.to_string(), "error_type": et, "error_message": &em[..em.len().min(200)],
-            "solution": sol, "resolved": res, "project": proj, "similarity": sim
+            "id": row.id.to_string(),
+            "error_type": row.error_type,
+            "error_message": safe_truncate(&row.error_message, 200),
+            "solution": row.solution,
+            "resolved": row.resolved,
+            "project": row.project,
+            "similarity": row.sim
         })
     }).collect();
 

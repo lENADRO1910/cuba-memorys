@@ -18,13 +18,14 @@ pub fn compute_grounding(
     let avg_sim = similarities.iter().sum::<f64>() / similarities.len() as f64;
     let count = similarities.len();
 
-    // Source diversity bonus
+    // Source diversity factor (0..1)
     let unique_sources: std::collections::HashSet<&str> = sources.iter().copied().collect();
-    let diversity_bonus = (unique_sources.len() as f64 / sources.len().max(1) as f64) * 0.1;
+    let diversity = unique_sources.len() as f64 / sources.len().max(1) as f64;
 
-    // Confidence = max_sim * 0.5 + avg_sim * 0.3 + coverage * 0.2 + diversity
+    // Weights sum to 1.0: 0.45 + 0.25 + 0.20 + 0.10 = 1.00
     let coverage = (count as f64 / 10.0).min(1.0);
-    let confidence = (max_sim * 0.5 + avg_sim * 0.3 + coverage * 0.2 + diversity_bonus).min(1.0);
+    let confidence = (max_sim * 0.45 + avg_sim * 0.25 + coverage * 0.20 + diversity * 0.10)
+        .min(1.0);
 
     let level = if confidence > 0.7 {
         "verified"

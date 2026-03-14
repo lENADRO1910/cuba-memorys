@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS brain_observations (
     -- Semantic embedding (pgvector required — guaranteed by pgvector/pgvector Docker image)
     embedding vector(384),
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector('simple', content)
     ) STORED

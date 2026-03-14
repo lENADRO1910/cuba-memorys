@@ -9,11 +9,10 @@ use crate::constants::{
     DEDUP_THRESHOLD,
     VALID_OBSERVATION_TYPES, VALID_SOURCES,
 };
-use crate::cognitive::prediction_error;
+use crate::cognitive::{density, prediction_error};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::HashSet;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -109,12 +108,31 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         "observation added"
     );
 
+    // Overload warning — alert if entity has too many observations
+    let obs_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_observations WHERE entity_id = $1 AND observation_type != 'superseded'"
+    )
+    .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+
+    let overload_warning = if obs_count.0 > 50 {
+        Some(format!(
+            "Entity '{}' has {} observations. Consider running cuba_zafra(action='summarize', entity_name='{}') to consolidate.",
+            entity_name, obs_count.0, entity_name
+        ))
+    } else {
+        None
+    };
+
     Ok(serde_json::json!({
         "action": "add",
         "id": row.0.to_string(),
         "entity_name": entity_name,
         "observation_type": obs_type,
-        "information_density": density
+        "information_density": density,
+        "overload_warning": overload_warning
     }))
 }
 
@@ -331,7 +349,7 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
     for (obs_id, existing_content, sim) in &dupes {
         let sim = *sim;
         if sim > DEDUP_THRESHOLD {
-            return Ok(DedupResult::Duplicate(existing_content[..80.min(existing_content.len())].to_string()));
+            return Ok(DedupResult::Duplicate(super::zafra::safe_truncate(existing_content, 80).to_string()));
         }
         // V5.1: Adaptive PE gating (Friston, Nature 2023)
         let action = prediction_error::adaptive_gate(sim, &recent);
@@ -390,37 +408,9 @@ async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
         .context(format!("Entity '{name}' not found"))
 }
 
-/// FIX B5: Information density using UNIQUE word count (Shannon-inspired).
-///
-/// H_max = log2(unique_words), not log2(total_words).
+/// Delegate to cognitive::density module (DRY — eliminates inline duplication).
 fn information_density(content: &str) -> f64 {
-    let words: Vec<&str> = content.split_whitespace().collect();
-    let total = words.len();
-    if total == 0 {
-        return 0.0;
-    }
-
-    let unique: HashSet<&str> = words.iter().copied().collect();
-    let unique_count = unique.len();
-
-    if unique_count <= 1 {
-        return 0.1;
-    }
-
-    // H_max = log2(unique_words) — FIX B5
-    let h_max = (unique_count as f64).log2();
-
-    // Entropy from word frequencies
-    let mut entropy = 0.0;
-    for word in &unique {
-        let freq = words.iter().filter(|w| *w == word).count() as f64 / total as f64;
-        if freq > 0.0 {
-            entropy -= freq * freq.log2();
-        }
-    }
-
-    // Normalize: density = entropy / h_max
-    (entropy / h_max).clamp(0.0, 1.0)
+    density::information_density(content)
 }
 
 #[cfg(test)]
@@ -429,14 +419,12 @@ mod tests {
 
     #[test]
     fn test_information_density_diverse() {
-        // All unique words → high density
         let d = information_density("rust is fast and safe for systems");
         assert!(d > 0.8, "diverse text should have high density: got {d}");
     }
 
     #[test]
     fn test_information_density_repetitive() {
-        // Repeated words → low density
         let d = information_density("hello hello hello hello hello");
         assert!(d < 0.3, "repetitive text should have low density: got {d}");
     }
@@ -444,11 +432,5 @@ mod tests {
     #[test]
     fn test_information_density_empty() {
         assert_eq!(information_density(""), 0.0);
-    }
-
-    #[test]
-    fn test_information_density_single() {
-        let d = information_density("hello");
-        assert_eq!(d, 0.1);
     }
 }

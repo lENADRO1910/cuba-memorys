@@ -1,7 +1,6 @@
 //! Constants, tool definitions, and threshold configuration.
 //!
 //! Mirrors Python constants.py — tool definitions for MCP tools/list.
-#![allow(dead_code)]
 
 use serde_json::Value;
 
@@ -59,11 +58,8 @@ pub const RETRIEVAL_SEARCH_BOOST: f64 = 0.05; // VF2: Testing Effect
 /// Range [0.1, 0.8]. Adaptive per-entity via sigmoid(access_count).
 pub const DEFAULT_DECAY_RATE: f64 = 0.5;
 
-/// RRF (Reciprocal Rank Fusion) constants.
-/// V5: Adaptive k — scales with result count (Azure AI Search 2025).
-pub const RRF_K: f64 = 60.0;
-pub const RRF_K_MIN: f64 = 10.0;
-pub const RRF_K_MAX: f64 = 60.0;
+// RRF k=60 constant moved to search/rrf.rs and handlers/faro.rs (V4)
+// Adaptive RRF_K_MIN/MAX removed per Gemini Deep Research audit 2026-03-14.
 
 /// Relation types.
 pub const VALID_RELATION_TYPES: &[&str] = &[

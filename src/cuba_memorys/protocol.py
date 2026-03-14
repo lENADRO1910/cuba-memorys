@@ -193,6 +193,7 @@ async def _rem_pagerank() -> None:
     """Run PageRank as part of REM consolidation."""
     try:
         import networkx as nx  # type: ignore[import-untyped]
+
         from cuba_memorys.handlers import _build_brain_graph
 
         g, has_data = await _build_brain_graph(directed=True)
@@ -276,7 +277,7 @@ async def main() -> None:
         while not shutdown_event.is_set():
             try:
                 line = await asyncio.wait_for(reader.readline(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 rem_task = _check_rem_idle(
                     time.monotonic() - last_activity, rem_task,
                 )

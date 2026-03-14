@@ -67,7 +67,13 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
         .await
         .context("failed to initialize schema")?;
 
-    tracing::info!("schema initialized");
+    // FIX R-004: Force UTC timezone for FSRS decay + REM consistency
+    sqlx::query("SET timezone TO 'UTC'")
+        .execute(pool)
+        .await
+        .context("failed to set timezone to UTC")?;
+
+    tracing::info!("schema initialized (timezone=UTC)");
 
     // Apply Dual-Strength migration (idempotent)
     sqlx::raw_sql(DUAL_STRENGTH_MIGRATION)

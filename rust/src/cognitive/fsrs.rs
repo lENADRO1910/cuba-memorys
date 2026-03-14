@@ -1,18 +1,29 @@
-//! Custom FSRS-6 implementation (ADR-001: ~50 LOC, zero deps).
+//! Custom FSRS-6 implementation (ADR-001: ~50 LOC core, zero deps).
 //!
-//! Implements retrievability calculation and stability update.
 //! Based on Ye 2024 paper, 21 parameters.
-//!
 //! V4: FSRS-6 upgrade from FSRS-4 (21 params instead of 4).
 //! V5: Personalizable decay rate w20 (Expertium 2025) — per-entity.
+//! V6: Topological Inertia (Gemini Deep Research 2026-03-14).
+//!     Hub nodes with high PageRank retain stability longer:
+//!     S'_graph = S' × (1 + γ * ln(1 + PR(n)))
+//!     γ = 0.5 (default, tunable). Prevents "structural amnesia"
+//!     where critical hub nodes are pruned despite high connectivity.
 
 use crate::constants::{DECAY_THRESHOLD, DEFAULT_DECAY_RATE, FSRS6_DEFAULT_PARAMS};
 use anyhow::Result;
 use sqlx::PgPool;
 
+// ── Topological Inertia Parameters (Gemini Deep Research 2026-03-14) ─
+/// Topological inertia coefficient: scales PageRank influence on stability.
+/// Higher γ → hub nodes retain stability more aggressively.
+/// Range: [0.0, 2.0]. Default: 0.5. Set to 0.0 to disable.
+const TOPO_INERTIA_GAMMA: f64 = 0.5;
+
 /// FSRS-6 default decay constant.
+#[allow(dead_code)]
 const DECAY: f64 = -0.5;
 /// FSRS-6 factor derived from decay constant.
+#[allow(dead_code)]
 const FACTOR: f64 = 0.9f64; // 19.0 / 81.0 precomputed below
 
 /// Calculate retrievability from stability and elapsed days.
@@ -20,14 +31,6 @@ const FACTOR: f64 = 0.9f64; // 19.0 / 81.0 precomputed below
 /// Formula: R(t, S) = (1 + FACTOR * t / S)^(-decay_rate)
 ///
 /// V5: decay_rate is now personalizable per entity (w20 in FSRS-6).
-/// Range: [0.1, 0.8]. Default: 0.5. Lower = slower forgetting.
-///
-/// Args:
-///     stability: Current stability parameter (S).
-///     elapsed_days: Days since last review/access.
-///
-/// Returns:
-///     Retrievability in [0.0, 1.0].
 pub fn retrievability(stability: f64, elapsed_days: f64) -> f64 {
     retrievability_with_decay(stability, elapsed_days, DEFAULT_DECAY_RATE)
 }
@@ -44,11 +47,7 @@ pub fn retrievability_with_decay(stability: f64, elapsed_days: f64, decay_rate: 
 
 /// Compute adaptive decay rate from access_count (FSRS-6 w20).
 ///
-/// High-access entities forget slower; rarely-accessed forget faster.
 /// Uses sigmoid mapping: decay = 0.1 + 0.7 / (1 + e^(0.05 * (count - 30)))
-///
-/// Returns:
-///     Decay rate in [0.1, 0.8].
 pub fn adaptive_decay_rate(access_count: i32) -> f64 {
     let sigmoid = 1.0 / (1.0 + (0.05 * (access_count as f64 - 30.0)).exp());
     (0.1 + 0.7 * sigmoid).clamp(0.1, 0.8)
@@ -57,15 +56,6 @@ pub fn adaptive_decay_rate(access_count: i32) -> f64 {
 /// Update stability after a recall event.
 ///
 /// Uses FSRS-6 formula with 21 default parameters.
-///
-/// Args:
-///     current_stability: Current S value.
-///     difficulty: Current D value (1-10).
-///     retrievability: Current R(t, S).
-///     rating: How well recalled (0-3, where 3 = easy).
-///
-/// Returns:
-///     New stability value.
 pub fn update_stability(
     current_stability: f64,
     difficulty: f64,
@@ -73,24 +63,20 @@ pub fn update_stability(
     rating: u8,
 ) -> f64 {
     let w = &FSRS6_DEFAULT_PARAMS;
-
-    // Clamp inputs
     let d = difficulty.clamp(1.0, 10.0);
     let r = retrievability.clamp(0.0, 1.0);
     let s = current_stability.max(0.01);
 
     match rating {
-        // Again (forgot) → new stability from scratch
         0 => {
             w[11] * d.powf(-w[12]) * ((s + 1.0).powf(w[13]) - 1.0)
                 * (w[14] * (1.0 - r)).exp()
         }
-        // Hard/Good/Easy → multiply current stability
         _ => {
             let rating_bonus = match rating {
-                1 => w[15], // Hard
-                2 => 1.0,   // Good (baseline)
-                3 => w[16], // Easy
+                1 => w[15],
+                2 => 1.0,
+                3 => w[16],
                 _ => 1.0,
             };
             s * (1.0 + (w[8] * d.powf(-w[9]) * (s.powf(-w[10]) - 1.0) * rating_bonus).exp())
@@ -98,40 +84,38 @@ pub fn update_stability(
     }
 }
 
+/// V6: Apply Topological Inertia to FSRS stability.
+///
+/// S'_graph = S' × (1 + γ × ln(1 + PR(n)))
+///
+/// Hub nodes (high PageRank) get higher effective stability,
+/// preventing "structural amnesia" where important knowledge hubs
+/// are forgotten despite being well-connected.
+///
+/// Scientific basis: Scale-free network theory (Barabási 1999).
+/// Hub nodes serve as "memory anchors" — losing them fragments
+/// the knowledge graph disproportionately.
+pub fn apply_topological_inertia(base_stability: f64, pagerank: f64) -> f64 {
+    let pr = pagerank.max(0.0);
+    base_stability * (1.0 + TOPO_INERTIA_GAMMA * (1.0 + pr).ln())
+}
+
 /// Update difficulty based on rating.
-///
-/// Args:
-///     current_difficulty: Current D value.
-///     rating: How well recalled (0-3).
-///
-/// Returns:
-///     New difficulty value in [1.0, 10.0].
 pub fn update_difficulty(current_difficulty: f64, rating: u8) -> f64 {
     let w = &FSRS6_DEFAULT_PARAMS;
     let d = current_difficulty;
-
-    // Mean reversion toward initial difficulty
-    let delta = -(w[6] as f64) * (rating as f64 - 3.0);
+    let delta = -w[6] * (rating as f64 - 3.0);
     let new_d = d + delta;
-
-    // Apply mean reversion
     let mean_reversion = w[7] * (w[4] - new_d);
     (new_d + mean_reversion).clamp(1.0, 10.0)
 }
 
 /// Batch decay — apply FSRS retrievability check on all observations.
 ///
-/// V1: Single batch UPDATE instead of N individual queries.
-///
-/// Args:
-///     pool: Database pool.
-///     protected: Entity IDs to skip (active session protection).
-///
-/// Returns:
-///     Number of observations with updated stability.
+/// V6: Incorporates topological inertia via PageRank proportional factor.
+/// Entities with high PageRank resist decay (stability multiplied by
+/// topological inertia factor in the threshold comparison).
 pub async fn batch_decay(pool: &PgPool, protected: &[uuid::Uuid]) -> Result<usize> {
-    // V5: Per-entity adaptive decay rate based on access_count.
-    // Uses sigmoid mapping: high-access entities decay slower.
     let result = sqlx::query(
         r#"
         UPDATE brain_observations o SET
@@ -143,10 +127,14 @@ pub async fn batch_decay(pool: &PgPool, protected: &[uuid::Uuid]) -> Result<usiz
           AND o.entity_id NOT IN (SELECT UNNEST($1::uuid[]))
           AND o.observation_type != 'superseded'
           AND (
-            -- V5: Adaptive decay rate from access_count via sigmoid
-            -- decay_rate = clamp(0.1 + 0.7 / (1 + exp(0.05 * (count - 30))), 0.1, 0.8)
+            -- V6: Topological inertia — multiply stability by (1 + γ * ln(1 + PR))
+            -- High-PR entities have effective higher stability → resist decay
             POWER(
-                1.0 + (19.0/81.0) * EXTRACT(EPOCH FROM (NOW() - o.last_accessed)) / 86400.0 / GREATEST(o.stability, 0.01),
+                1.0 + (19.0/81.0) * EXTRACT(EPOCH FROM (NOW() - o.last_accessed)) / 86400.0
+                    / GREATEST(
+                        o.stability * (1.0 + $3 * LN(1.0 + COALESCE(e.importance, 0.0))),
+                        0.01
+                    ),
                 -LEAST(0.8, GREATEST(0.1, 0.1 + 0.7 / (1.0 + EXP(0.05 * (e.access_count - 30)))))
             ) < $2
           )
@@ -154,6 +142,7 @@ pub async fn batch_decay(pool: &PgPool, protected: &[uuid::Uuid]) -> Result<usiz
     )
     .bind(protected)
     .bind(DECAY_THRESHOLD)
+    .bind(TOPO_INERTIA_GAMMA)
     .execute(pool)
     .await?;
 
@@ -185,7 +174,6 @@ mod tests {
 
     #[test]
     fn test_retrievability_custom_decay_slow() {
-        // V5: Low decay (0.1) → forgets much slower
         let r_slow = retrievability_with_decay(1.0, 10.0, 0.1);
         let r_default = retrievability(1.0, 10.0);
         assert!(r_slow > r_default, "slow decay should retain more: {r_slow} vs {r_default}");
@@ -193,7 +181,6 @@ mod tests {
 
     #[test]
     fn test_retrievability_custom_decay_fast() {
-        // V5: High decay (0.8) → forgets faster
         let r_fast = retrievability_with_decay(1.0, 10.0, 0.8);
         let r_default = retrievability(1.0, 10.0);
         assert!(r_fast < r_default, "fast decay should retain less: {r_fast} vs {r_default}");
@@ -201,24 +188,21 @@ mod tests {
 
     #[test]
     fn test_adaptive_decay_rate_low_access() {
-        // V5: Low access → high decay rate (forgets faster)
         let rate = adaptive_decay_rate(0);
         assert!(rate > 0.5, "low access should have high decay: {rate}");
     }
 
     #[test]
     fn test_adaptive_decay_rate_high_access() {
-        // V5: High access → low decay rate (forgets slower)
         let rate = adaptive_decay_rate(100);
         assert!(rate < 0.2, "high access should have low decay: {rate}");
     }
 
     #[test]
     fn test_adaptive_decay_rate_bounds() {
-        // V5: Always within [0.1, 0.8]
         for count in [0, 1, 5, 10, 30, 50, 100, 500, 1000] {
             let rate = adaptive_decay_rate(count);
-            assert!(rate >= 0.1 && rate <= 0.8, "out of bounds at count={count}: {rate}");
+            assert!((0.1..=0.8).contains(&rate), "out of bounds at count={count}: {rate}");
         }
     }
 
@@ -238,6 +222,45 @@ mod tests {
     #[test]
     fn test_difficulty_bounds() {
         let d = update_difficulty(5.0, 0);
-        assert!(d >= 1.0 && d <= 10.0);
+        assert!((1.0..=10.0).contains(&d));
+    }
+
+    // ── V6: Topological Inertia Tests ─────────────────────────────
+
+    #[test]
+    fn test_topological_inertia_hub_boost() {
+        // High PageRank → stability multiplied up
+        let base_s = 10.0;
+        let s_hub = apply_topological_inertia(base_s, 0.5);
+        assert!(s_hub > base_s, "hub should have higher stability: {s_hub} vs {base_s}");
+    }
+
+    #[test]
+    fn test_topological_inertia_leaf_minimal() {
+        // Very low PageRank → minimal boost (near 1.0 multiplier)
+        let base_s = 10.0;
+        let s_leaf = apply_topological_inertia(base_s, 0.001);
+        assert!(
+            (s_leaf - base_s).abs() < 0.1,
+            "leaf node should have near-base stability: {s_leaf} vs {base_s}"
+        );
+    }
+
+    #[test]
+    fn test_topological_inertia_zero_pr() {
+        // PageRank=0 → ln(1+0) = 0 → no boost
+        let base_s = 10.0;
+        let s = apply_topological_inertia(base_s, 0.0);
+        assert!((s - base_s).abs() < 1e-10, "zero PR should have no boost: {s}");
+    }
+
+    #[test]
+    fn test_topological_inertia_monotonic() {
+        // Higher PR → higher effective stability (monotonic)
+        let s1 = apply_topological_inertia(10.0, 0.1);
+        let s2 = apply_topological_inertia(10.0, 0.5);
+        let s3 = apply_topological_inertia(10.0, 1.0);
+        assert!(s1 < s2, "monotonic: s1 < s2");
+        assert!(s2 < s3, "monotonic: s2 < s3");
     }
 }

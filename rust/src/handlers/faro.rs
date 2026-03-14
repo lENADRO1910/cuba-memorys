@@ -4,9 +4,10 @@
 //! §A: Weighted RRF Entropy Routing — dynamic weight based on query entropy.
 //! V8: Graceful degradation — if vector search fails, fallback to text.
 //! VF2: Testing Effect — search matches boost retrieval_strength.
+//! V4-RRF: k=60 constant (Cormack 2009) — removed adaptive instability.
 
-use crate::constants::{RRF_K_MIN, RRF_K_MAX};
 use crate::cognitive::dual_strength;
+use crate::search::confidence as grounding;
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -14,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 50;
+const DEFAULT_MAX_TOKENS: i64 = 5000;
+const GRAPHRAG_TOP_K: usize = 3;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -28,15 +31,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .unwrap_or(DEFAULT_LIMIT)
         .min(MAX_LIMIT);
 
+    let max_tokens = args.get("max_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+
     match mode {
-        "hybrid" => hybrid_search(pool, query, scope, limit).await,
+        "hybrid" => hybrid_search(pool, query, scope, limit, max_tokens).await,
         "verify" => verify_claim(pool, query).await,
         _ => anyhow::bail!("Invalid mode: {mode}. Use hybrid/verify"),
     }
 }
 
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
-async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Result<Value> {
+async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_tokens: i64) -> Result<Value> {
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = compute_query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
@@ -47,10 +54,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
     // Run vector search (may fail gracefully — V8)
     let vector_results = vector_search(pool, query, scope, limit * 2).await;
 
-    // P3: Adaptive RRF k — scales with result count (Azure AI Search 2025)
-    let total_results = text_results.len()
-        + vector_results.as_ref().map(|v| v.len()).unwrap_or(0);
-    let rrf_k = adaptive_rrf_k(total_results);
+    // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
+    let rrf_k: f64 = 60.0;
 
     // RRF Fusion with entropy-weighted scores and adaptive k
     let mut fused_scores: HashMap<String, (f64, Value)> = HashMap::new();
@@ -114,7 +119,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     }
 
-    let results_json: Vec<Value> = results
+    // GraphRAG enrichment — add degree-1 neighbors for top-K results (V9)
+    let graphrag_context = enrich_graphrag(pool, &results, GRAPHRAG_TOP_K).await;
+
+    // Token-budget truncation
+    let mut results_json: Vec<Value> = results
         .iter()
         .map(|(_, score, result)| {
             let mut r = result.clone();
@@ -125,22 +134,38 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> R
         })
         .collect();
 
+    // FIX R-005: Check budget BEFORE subtraction to prevent i64 underflow
+    let mut token_budget = max_tokens;
+    results_json = results_json.into_iter().take_while(|r| {
+        let content_len = r.get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.len() as i64 / 4)
+            .unwrap_or(20);
+        if token_budget < content_len {
+            return false;
+        }
+        token_budget -= content_len;
+        true
+    }).collect();
+
     Ok(serde_json::json!({
         "mode": "hybrid",
         "query": query,
         "results": results_json,
         "count": results_json.len(),
+        "graphrag_context": graphrag_context,
         "search_config": {
             "query_entropy": query_entropy,
             "text_weight": text_weight,
             "vector_weight": vector_weight,
             "rrf_k": rrf_k,
-            "session_aware": !session_boost.is_empty()
+            "session_aware": !session_boost.is_empty(),
+            "max_tokens": max_tokens
         }
     }))
 }
 
-/// Verify a claim against stored knowledge.
+/// Verify a claim against stored knowledge with source diversity scoring.
 async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     let evidence: Vec<(String, f64, String)> = sqlx::query_as(
         "SELECT content, similarity(content, $1)::float8 AS sim, observation_type
@@ -154,25 +179,10 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
-    let (confidence, level) = if evidence.is_empty() {
-        (0.0, "unknown")
-    } else {
-        let max_sim = evidence.first().map(|(_, s, _)| *s).unwrap_or(0.0);
-        let avg_sim = evidence.iter().map(|(_, s, _)| s).sum::<f64>() / evidence.len() as f64;
-        let count = evidence.len();
+    let similarities: Vec<f64> = evidence.iter().map(|(_, s, _)| *s).collect();
+    let sources: Vec<&str> = evidence.iter().map(|(_, _, t)| t.as_str()).collect();
 
-        let confidence = max_sim * 0.5 + avg_sim * 0.3 + (count as f64 / 10.0).min(1.0) * 0.2;
-        let level = if confidence > 0.7 {
-            "verified"
-        } else if confidence > 0.5 {
-            "partial"
-        } else if confidence > 0.3 {
-            "weak"
-        } else {
-            "unknown"
-        };
-        (confidence, level)
-    };
+    let (confidence, level) = grounding::compute_grounding(&similarities, &sources);
 
     let evidence_json: Vec<Value> = evidence
         .iter()
@@ -191,7 +201,8 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
         "confidence": confidence,
         "grounding": level,
         "evidence": evidence_json,
-        "evidence_count": evidence_json.len()
+        "evidence_count": evidence_json.len(),
+        "source_diversity": sources.len()
     }))
 }
 
@@ -373,13 +384,10 @@ fn entropy_weights(entropy: f64) -> (f64, f64) {
     }
 }
 
-/// P3: Adaptive RRF k — scales with result count (Azure AI Search 2025).
-///
-/// With few results (< 20), a lower k prioritizes top-ranked items.
-/// With many results (> 120), k = 60 maintains stability.
-fn adaptive_rrf_k(result_count: usize) -> f64 {
-    (result_count as f64 * 0.5).clamp(RRF_K_MIN, RRF_K_MAX)
-}
+// V3 adaptive_rrf_k REMOVED — k=60 constant per Gemini Deep Research audit 2026-03-14.
+// Rationale: dynamic sqrt-based k introduced non-monotonic ranking instabilities
+// and violated determinism. Cormack et al. 2009, Azure AI Search, Elasticsearch
+// all converge on k=60 as empirically optimal.
 
 /// §A: Compute query entropy for RRF weighting.
 fn compute_query_entropy(query: &str) -> f64 {
@@ -414,4 +422,57 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     } else {
         Ok(vec![])
     }
+}
+
+/// V9: GraphRAG enrichment — fetch degree-1 neighbors for top-K results.
+///
+/// For each top result that has an entity name, we query its related entities
+/// to provide graph context. This helps the AI understand the broader
+/// knowledge structure around search matches.
+async fn enrich_graphrag(
+    pool: &PgPool,
+    results: &[(String, f64, Value)],
+    top_k: usize,
+) -> Value {
+    let mut context: Vec<Value> = Vec::new();
+
+    for (_, _, result) in results.iter().take(top_k) {
+        let entity_name = result.get("entity_name")
+            .or_else(|| result.get("name"))
+            .and_then(|v| v.as_str());
+
+        if let Some(name) = entity_name {
+            let neighbors: Vec<(String, String, f64)> = match sqlx::query_as(
+                "SELECT e.name, r.relation_type, e.importance::float8
+                 FROM brain_relations r
+                 JOIN brain_entities e ON e.id = CASE
+                     WHEN r.from_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1) THEN r.to_entity
+                     ELSE r.from_entity
+                 END
+                 WHERE r.from_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
+                    OR r.to_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
+                 ORDER BY r.strength DESC
+                 LIMIT 5"
+            )
+            .bind(name)
+            .fetch_all(pool)
+            .await {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            if !neighbors.is_empty() {
+                let neighbor_list: Vec<Value> = neighbors.iter().map(|(n, rel, imp)| {
+                    serde_json::json!({"name": n, "relation": rel, "importance": imp})
+                }).collect();
+
+                context.push(serde_json::json!({
+                    "entity": name,
+                    "neighbors": neighbor_list
+                }));
+            }
+        }
+    }
+
+    serde_json::json!(context)
 }

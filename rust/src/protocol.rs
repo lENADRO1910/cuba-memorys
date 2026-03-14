@@ -117,8 +117,18 @@ pub async fn run_mcp() -> Result<()> {
             }
         };
 
+        // Notifications have no id — must NOT send a response (MCP spec).
+        let is_notification = request.id.is_none();
         let id = request.id.clone().unwrap_or(Value::Null);
         let response = handle_request(&pool, request).await;
+
+        // Skip response for notifications (Python parity: returns None).
+        if is_notification {
+            if let Err(e) = &response {
+                tracing::warn!(error = %e, "notification handler error (suppressed)");
+            }
+            continue;
+        }
 
         let json_response = JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -151,7 +161,8 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
     match request.method.as_str() {
         // MCP lifecycle
         "initialize" => Ok(server_info()),
-        "initialized" => Ok(Value::Null),
+        "initialized" | "notifications/initialized" => Ok(Value::Null),
+        "notifications/cancelled" => Ok(Value::Null),
         "ping" => Ok(serde_json::json!({})),
 
         // Tool listing
@@ -227,7 +238,7 @@ async fn rem_daemon(pool: PgPool) {
 
 /// Execute REM sleep consolidation steps.
 ///
-/// Steps: FSRS decay → PageRank → RWR Spreading → TF-IDF rebuild.
+/// Steps: FSRS decay → PageRank → Neighbor Diffusion → TF-IDF rebuild.
 async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     // 1. Get active session goals (for session protection - FIX B4)
     let active_session: Option<(uuid::Uuid, Vec<String>)> = {
@@ -264,9 +275,9 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
-    // 5. RWR Spreading Activation (§C)
-    crate::cognitive::spreading::spreading_activation(pool).await?;
-    tracing::info!("RWR spreading activation completed");
+    // 5. Neighbor Diffusion (§C — Collins & Loftus 1975)
+    crate::cognitive::spreading::neighbor_diffusion(pool).await?;
+    tracing::info!("neighbor diffusion completed");
 
     // 6. TF-IDF index: BM25 index is in-memory, rebuilt on demand per REM cycle
     // (no persistent index to rebuild — Bm25Index lives in handler state)

@@ -1,0 +1,56 @@
+# cargo-deny configuration for cuba-memorys
+# AI-3: Automated GPL/AGPL/SSPL rejection + advisory checking
+#
+# Usage: cargo install cargo-deny && cargo deny check
+# CI: cargo deny check licenses advisories
+
+[licenses]
+# Block copyleft licenses incompatible with CC-BY-NC-4.0
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+]
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "SSPL-1.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+]
+copyleft = "deny"
+# Some crates don't have license info — warn but don't block
+default = "warn"
+confidence-threshold = 0.8
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Treat unmaintained crates as warnings (not errors)
+unmaintained = "warn"
+# Treat yanked versions as deny
+yanked = "deny"
+# Ignore specific advisories if needed (add IDs here)
+ignore = []
+
+[bans]
+# Prevent duplicate versions of the same crate
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Only allow crates from crates.io
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

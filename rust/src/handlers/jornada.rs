@@ -20,7 +20,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             let outcome = args.get("outcome").and_then(|v| v.as_str()).unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
             let result = sqlx::query(
-                "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2 WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+                "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2 WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1)"
             ).bind(outcome).bind(summary).execute(pool).await?;
             Ok(serde_json::json!({"action": "ended", "outcome": outcome, "updated": result.rows_affected() > 0}))
         }

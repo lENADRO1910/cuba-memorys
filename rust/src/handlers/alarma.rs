@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use super::zafra::safe_truncate;
+
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let error_type = args.get("error_type").and_then(|v| v.as_str()).unwrap_or("Unknown");
     let error_message = args.get("error_message").and_then(|v| v.as_str()).unwrap_or("");
@@ -14,12 +16,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("error_message is required");
     }
 
-    // Insert error
+    // Insert error (FIX A-003: safe_truncate prevents UTF-8 panic)
     let row: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_errors (error_type, error_message, context, project) VALUES ($1, $2, $3, $4) RETURNING id"
     )
     .bind(error_type)
-    .bind(&error_message[..error_message.len().min(5000)])
+    .bind(safe_truncate(error_message, 5000))
     .bind(&context)
     .bind(project)
     .fetch_one(pool)

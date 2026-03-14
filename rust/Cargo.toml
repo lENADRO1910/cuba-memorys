@@ -26,8 +26,9 @@ serde_json = "1"
 # Graph algorithms
 petgraph = "0.7"
 
-# Embeddings (ONNX Runtime) — RC until stable release
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+# Embeddings (ONNX Runtime) — pinned RC (ADR audit 2026-03-14)
+# IMPORTANT: =exact pin until ort 2.0.0 stable releases. Do NOT change.
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 tokenizers = "0.21"
 
 # Logging (structured, to stderr)

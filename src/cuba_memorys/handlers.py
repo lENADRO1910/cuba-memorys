@@ -17,17 +17,7 @@ from typing import Any
 
 import asyncpg
 
-from cuba_memorys import __version__, db, search, embeddings
-from cuba_memorys.search import rrf_fuse
-from cuba_memorys.hebbian import (
-    fsrs_retrievability,
-    fsrs_update_stability,
-    information_density,
-    oja_negative,
-    oja_positive,
-    synapse_weight_boost,
-)
-from cuba_memorys.tfidf import tfidf_index
+from cuba_memorys import __version__, db, embeddings, search
 from cuba_memorys.constants import (
     CONTRADICTION_THRESHOLD,
     DEDUP_THRESHOLD,
@@ -46,6 +36,16 @@ from cuba_memorys.constants import (
     OBS_OVERLOAD_THRESHOLD,
     VALID_ENTITY_TYPES,
 )
+from cuba_memorys.hebbian import (
+    fsrs_retrievability,
+    fsrs_update_stability,
+    information_density,
+    oja_negative,
+    oja_positive,
+    synapse_weight_boost,
+)
+from cuba_memorys.search import rrf_fuse
+from cuba_memorys.tfidf import tfidf_index
 
 logger = logging.getLogger("cuba-memorys.handlers")
 
@@ -130,9 +130,9 @@ def _elapsed_days(last_accessed: Any) -> float:
     if last_accessed is None:
         return 1.0
     import datetime
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     if hasattr(last_accessed, 'tzinfo') and last_accessed.tzinfo is None:
-        last_accessed = last_accessed.replace(tzinfo=datetime.timezone.utc)
+        last_accessed = last_accessed.replace(tzinfo=datetime.UTC)
     delta = (now - last_accessed).total_seconds() / 86400.0
     return max(0.01, delta)
 
@@ -386,6 +386,60 @@ async def _observe_add(entity_id: Any, args: dict[str, Any]) -> str:
     return db.serialize(result)
 
 
+async def _process_single_observation(
+    entity_id: Any, obs_data: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, list[str]]:
+    """Process one observation for batch add.
+
+    Returns:
+        Tuple of (inserted_row | None, skip_reason | None, warnings).
+    """
+    content = obs_data.get("content", "")[:MAX_CONTENT_LENGTH]
+    if not content:
+        return None, "(empty)", []
+
+    is_dup, warnings, _ = await _check_dedup(entity_id, content)
+    if is_dup:
+        return None, content[:60], warnings
+
+    density = information_density(content)
+    initial_importance = 0.3 if density < 0.3 else 0.5
+
+    row = await db.fetchrow(
+        "INSERT INTO brain_observations "
+        "(entity_id, content, observation_type, source, importance) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING id, content",
+        entity_id, content,
+        obs_data.get("type", "fact"),
+        obs_data.get("source", "agent"),
+        initial_importance,
+    )
+    if row:
+        await _persist_embedding(content, row["id"])
+    return row, None, warnings
+
+
+async def _build_batch_result(
+    added: list[dict[str, Any]],
+    skipped: list[str],
+    warnings: list[str],
+    entity_id: Any,
+) -> str:
+    """Build serialized result for batch_add, enriching with optional fields."""
+    result: dict[str, Any] = {
+        "action": "batch_added", "count": len(added),
+        "observations": added,
+    }
+    if skipped:
+        result["skipped_duplicates"] = len(skipped)
+    if warnings:
+        result["contradictions"] = warnings
+    overload = await _check_overload(entity_id)
+    if overload:
+        result["warning"] = overload
+    return db.serialize(result)
+
+
 async def _observe_batch_add(entity_id: Any, args: dict[str, Any]) -> str:
     observations = args.get("observations", [])
     if not observations:
@@ -395,47 +449,17 @@ async def _observe_batch_add(entity_id: Any, args: dict[str, Any]) -> str:
     skipped = []
     all_warnings: list[str] = []
     for obs_data in observations:
-        content = obs_data.get("content", "")[:MAX_CONTENT_LENGTH]
-        obs_type = obs_data.get("type", "fact")
-        source = obs_data.get("source", "agent")
-
-        if not content:
-            skipped.append("(empty)")
-            continue
-
-        is_dup, warnings, _ = await _check_dedup(entity_id, content)
-        if is_dup:
-            skipped.append(content[:60])
-            continue
-        all_warnings.extend(warnings)
-
-        # V5: Information density gating — parity with _observe_add
-        density = information_density(content)
-        initial_importance = 0.3 if density < 0.3 else 0.5
-
-        row = await db.fetchrow(
-            "INSERT INTO brain_observations "
-            "(entity_id, content, observation_type, source, importance) "
-            "VALUES ($1, $2, $3, $4, $5) RETURNING id, content",
-            entity_id, content, obs_type, source, initial_importance,
+        row, skip_reason, warnings = await _process_single_observation(
+            entity_id, obs_data,
         )
-        if row:
-            await _persist_embedding(content, row["id"])
-        added.append(row)
+        all_warnings.extend(warnings)
+        if skip_reason:
+            skipped.append(skip_reason)
+        elif row:
+            added.append(row)
 
     search.cache_clear()
-    result: dict[str, Any] = {
-        "action": "batch_added", "count": len(added),
-        "observations": added,
-    }
-    if skipped:
-        result["skipped_duplicates"] = len(skipped)
-    if all_warnings:
-        result["contradictions"] = all_warnings
-    overload = await _check_overload(entity_id)
-    if overload:
-        result["warning"] = overload
-    return db.serialize(result)
+    return await _build_batch_result(added, skipped, all_warnings, entity_id)
 
 
 async def _observe_delete(
@@ -620,10 +644,10 @@ async def _search_verify(query: str) -> str:
         emb_score = _compute_embedding_score(query, r["content"])
 
         score, level = search.compute_confidence(
-            trgm_score=float(r.get("trgm_similarity", 0)),
+            trgm_score=float(r.get("trgm_similarity") or 0),
             tfidf_score=tfidf_sim,
-            importance=float(r.get("importance", 0.5)),
-            freshness_days=float(r.get("days_since_access", 0)),
+            importance=float(r.get("importance") or 0.5),
+            freshness_days=float(r.get("days_since_access") or 0),
             embedding_score=emb_score,
             access_count=int(r.get("access_count", 0)),  # V4
         )
@@ -635,7 +659,7 @@ async def _search_verify(query: str) -> str:
             "entity": r.get("entity_name"),
             "confidence": score,
             "level": level,
-            "trgm": round(float(r.get("trgm_similarity", 0)), 3),
+            "trgm": round(float(r.get("trgm_similarity") or 0), 3),
             "tfidf": round(tfidf_sim, 3),
             "access_count": r.get("access_count", 0),
         })
@@ -730,7 +754,7 @@ async def _collect_vector_signal(
     vec_rows = await db.fetch(search.SEARCH_VECTOR_SQL, limit, vec_list)
     for r in vec_rows:
         r["_type"] = "observation"
-        r["score"] = float(r.get("vector_score", 0))
+        r["score"] = float(r.get("vector_score") or 0)
     return vec_rows
 
 
@@ -1244,18 +1268,21 @@ async def _consolidate_merge(args: dict[str, Any]) -> str:
         sim_threshold,
     )
     merged = 0
-    for d in dupes:
-        await db.execute(
-            "UPDATE brain_observations SET "
-            "importance = LEAST(1.0, importance + 0.1) "
-            "WHERE id = $1",
-            d["id_a"],
-        )
-        await db.execute(
-            "DELETE FROM brain_observations WHERE id = $1",
-            d["id_b"],
-        )
-        merged += 1
+    if dupes:
+        pool = await db.get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+                for d in dupes:
+                    await conn.execute(
+                        "UPDATE brain_observations SET "
+                        "importance = LEAST(1.0, importance + 0.1) "
+                        "WHERE id = $1",
+                        d["id_a"],
+                    )
+                    await conn.execute(
+                        "DELETE FROM brain_observations WHERE id = $1",
+                        d["id_b"],
+                    )
+                    merged += 1
     search.cache_clear()
     return db.serialize({"action": "merged", "pairs_merged": merged})
 
@@ -1409,30 +1436,39 @@ async def handle_brain_feedback(args: dict[str, Any]) -> str:
 
 
 async def _feedback_entity(action: str, entity_name: str) -> str:
-    row = await db.fetchrow(
-        "SELECT id, importance FROM brain_entities WHERE name = $1",
-        entity_name,
-    )
-    if not row:
-        return db.serialize({"error": f"Entity '{entity_name}' not found"})
-
     if action == "positive":
-        new_imp = oja_positive(row["importance"])
+        row = await db.fetchrow(
+            "UPDATE brain_entities SET "
+            "importance = LEAST(1.0, GREATEST(0.01, "
+            "  importance + 0.05 * (1.0 - importance * importance))), "
+            "updated_at = NOW() WHERE name = $1 "
+            "RETURNING id, importance AS new_importance, "
+            "  (importance - 0.05 * (1.0 - importance * importance)) "
+            "  AS old_importance",
+            entity_name,
+        )
     elif action == "negative":
-        new_imp = oja_negative(row["importance"])
+        row = await db.fetchrow(
+            "UPDATE brain_entities SET "
+            "importance = LEAST(1.0, GREATEST(0.01, "
+            "  importance - 0.05 * (1.0 + importance * importance))), "
+            "updated_at = NOW() WHERE name = $1 "
+            "RETURNING id, importance AS new_importance, "
+            "  (importance + 0.05 * (1.0 + importance * importance)) "
+            "  AS old_importance",
+            entity_name,
+        )
     else:
         return db.serialize({"error": "correct requires observation_id"})
 
-    await db.execute(
-        "UPDATE brain_entities SET importance = $1, updated_at = NOW() "
-        "WHERE id = $2",
-        new_imp, row["id"],
-    )
+    if not row:
+        return db.serialize({"error": f"Entity '{entity_name}' not found"})
+
     search.cache_clear()
     return db.serialize({
         "action": action, "entity": entity_name,
-        "old_importance": row["importance"],
-        "new_importance": new_imp,
+        "old_importance": row["old_importance"],
+        "new_importance": row["new_importance"],
     })
 
 

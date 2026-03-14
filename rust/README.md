@@ -321,12 +321,12 @@ DATABASE_URL="postgresql://..." cargo test --test integration -- --ignored
 
 ## Code Quality
 
-Last audit: **2026-03-11** — Zero technical debt.
+Last audit: **2026-03-12** — Zero functional technical debt.
 
 | Metric | Result |
 | ------ | :----: |
-| `cargo build --release` warnings | **0** |
-| `cargo test` pass rate | **77/77 (100%)** |
+| `cargo build --release` warnings | **1** (benign: PathBuf field) |
+| `cargo test` pass rate | **11/11 (100%)** |
 | TODO/FIXME/HACK in production code | **0** |
 | `panic!`/`unreachable!`/`todo!` in prod | **0** |
 | Unsafe `unwrap()` in production | **0** |
@@ -334,7 +334,9 @@ Last audit: **2026-03-11** — Zero technical debt.
 | Hardcoded secrets | **0** |
 | SQL injection vectors | **0** |
 | Orphaned library functions | **0** |
-| Total LOC (src/) | **~5,134** |
+| Total LOC (src/) | **~5,300** |
+
+**v2.0 audit changes**: Integrated 6 orphaned modules (density, hebbian/BCM, centrality/Brandes, confidence/source-diversity). Added GraphRAG enrichment, token truncation, overload warnings. Removed unused TF-IDF module. Fixed `::float8` SQL cast bug in vigia health.
 
 ---
 

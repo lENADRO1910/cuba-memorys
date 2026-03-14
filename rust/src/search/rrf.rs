@@ -2,11 +2,16 @@
 //!
 //! Reciprocal Rank Fusion with Shannon entropy-based dynamic weighting.
 //! V2: Post-fusion dedup removes semantic duplicates across signals.
-//! V3: Adaptive k parameter (Azure AI Search 2025).
+//! V4: k=60 constant (Cormack et al. 2009) — eliminates V3 adaptive instability.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::constants::{RRF_K, RRF_K_MIN, RRF_K_MAX};
+/// Fixed RRF k constant — empirical consensus (Cormack 2009, Azure AI Search, ES 8.8+).
+///
+/// Adaptive k (V3) was removed per Gemini Deep Research audit 2026-03-14:
+/// dynamic sqrt-based k introduced non-monotonic ranking instabilities and
+/// violated determinism requirements for the MCP server.
+const RRF_K: f64 = 60.0;
 
 /// A ranked search result.
 #[derive(Clone, Debug)]
@@ -38,27 +43,31 @@ pub fn query_entropy(query: &str) -> f64 {
 /// RRF fusion across N ranked signal lists.
 ///
 /// Each signal can have a custom weight (§A: entropy-based).
-/// V3: Uses adaptive k parameter — pass `None` for default (60.0).
+/// V4: Uses fixed k=60 constant — Cormack et al. 2009 consensus.
+///
+/// Score_RRF(d) = Σ weight / (60 + rank + 1)
 pub fn fuse(
     signals: &[(Vec<RankedResult>, f64)], // (results, weight)
     dedup_threshold: f64,
-    adaptive_k: Option<f64>,
 ) -> Vec<RankedResult> {
-    let k = adaptive_k.unwrap_or(RRF_K);
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut items: HashMap<String, RankedResult> = HashMap::new();
 
     for (results, weight) in signals {
         for (rank, result) in results.iter().enumerate() {
-            let rrf_score = weight / (k + rank as f64 + 1.0);
+            let rrf_score = weight / (RRF_K + rank as f64 + 1.0);
             *scores.entry(result.id.clone()).or_default() += rrf_score;
             items.entry(result.id.clone()).or_insert_with(|| result.clone());
         }
     }
 
-    // Sort by fused score
+    // Sort by fused score, then by id for deterministic tie-breaking
     let mut sorted: Vec<(String, f64)> = scores.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0)) // Deterministic tie-break by id
+    });
 
     // V2: Post-fusion dedup by content overlap
     let mut unique: Vec<RankedResult> = Vec::new();
@@ -75,13 +84,6 @@ pub fn fuse(
     }
 
     unique
-}
-
-/// V3: Compute adaptive RRF k from result count (Azure AI Search 2025).
-///
-/// With fewer results, lower k sharpens ranking discrimination.
-pub fn adaptive_k(result_count: usize) -> f64 {
-    (result_count as f64 * 0.5).clamp(RRF_K_MIN, RRF_K_MAX)
 }
 
 /// V2: Word-overlap ratio (Jaccard-like with min denominator).
@@ -135,48 +137,25 @@ mod tests {
             RankedResult { id: "c".into(), content: "gamma".into(), score: 0.0, source: "vec".into() },
         ];
 
-        let fused = fuse(&[(signal1, 0.5), (signal2, 0.5)], 0.75, None);
+        let fused = fuse(&[(signal1, 0.5), (signal2, 0.5)], 0.75);
         assert!(!fused.is_empty());
         // "b" appears in both signals, should rank first
         assert_eq!(fused[0].id, "b", "item in both signals should rank first");
     }
 
     #[test]
-    fn test_adaptive_k_few_results() {
-        // V3: With few results, k should be low (sharper ranking)
-        let k = adaptive_k(10);
-        assert_eq!(k, 10.0); // 10 * 0.5 = 5.0, clamped to min 10.0
-    }
-
-    #[test]
-    fn test_adaptive_k_many_results() {
-        // V3: With many results, k should be capped at 60
-        let k = adaptive_k(200);
-        assert_eq!(k, 60.0); // 200 * 0.5 = 100.0, clamped to max 60.0
-    }
-
-    #[test]
-    fn test_adaptive_k_medium_results() {
-        // V3: Mid-range results scale linearly
-        let k = adaptive_k(60);
-        assert_eq!(k, 30.0); // 60 * 0.5 = 30.0
-    }
-
-    #[test]
-    fn test_rrf_fusion_with_adaptive_k() {
-        let signal1 = vec![
+    fn test_rrf_k60_deterministic() {
+        // V4: k=60 always, deterministic scores
+        let signal = vec![
             RankedResult { id: "a".into(), content: "alpha".into(), score: 0.0, source: "text".into() },
         ];
-        let signal2 = vec![
-            RankedResult { id: "a".into(), content: "alpha".into(), score: 0.0, source: "vec".into() },
-        ];
 
-        // Low k should give higher scores than high k
-        let fused_low_k = fuse(&[(signal1.clone(), 0.5), (signal2.clone(), 0.5)], 0.75, Some(10.0));
-        let fused_high_k = fuse(&[(signal1, 0.5), (signal2, 0.5)], 0.75, Some(60.0));
-
-        assert!(fused_low_k[0].score > fused_high_k[0].score,
-            "lower k should produce higher scores: {} vs {}",
-            fused_low_k[0].score, fused_high_k[0].score);
+        let fused = fuse(&[(signal, 1.0)], 0.75);
+        // Score should be exactly 1.0 / (60.0 + 0 + 1.0) = 1/61
+        let expected = 1.0 / 61.0;
+        assert!(
+            (fused[0].score - expected).abs() < 1e-10,
+            "k=60 fixed: expected {} got {}", expected, fused[0].score
+        );
     }
 }

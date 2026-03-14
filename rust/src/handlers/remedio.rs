@@ -1,8 +1,12 @@
 //! Handler: cuba_remedio — Resolve errors with solution.
+//!
+//! FIX A-005: UTF-8 safe truncation via zafra::safe_truncate.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
+
+use super::zafra::safe_truncate;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let error_id_str = args.get("error_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -38,7 +42,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await?;
 
     let cross_refs: Vec<Value> = similar.iter().map(|(id, msg)| {
-        serde_json::json!({"id": id.to_string(), "error_message": &msg[..msg.len().min(100)]})
+        serde_json::json!({"id": id.to_string(), "error_message": safe_truncate(msg, 100)})
     }).collect();
 
     Ok(serde_json::json!({

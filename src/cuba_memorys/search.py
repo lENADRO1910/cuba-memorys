@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 from typing import Any
 
@@ -64,6 +65,7 @@ def rrf_fuse(
     return unique
 
 _cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
+_cache_lock = threading.Lock()
 CACHE_TTL: float = 60.0
 CACHE_MAX_SIZE: int = 100
 
@@ -80,26 +82,28 @@ def _cache_key(query: str, mode: str, scope: str, limit: int) -> int:
 
 def cache_get(query: str, mode: str, scope: str, limit: int) -> list[dict[str, Any]] | None:
     key = _cache_key(query, mode, scope, limit)
-    if key in _cache:
-        ts, results = _cache[key]
-        if time.monotonic() - ts < CACHE_TTL:
-            return results
-        del _cache[key]
+    with _cache_lock:
+        if key in _cache:
+            ts, results = _cache[key]
+            if time.monotonic() - ts < CACHE_TTL:
+                return results
+            del _cache[key]
     return None
 
 def cache_set(
     query: str, mode: str, scope: str, limit: int,
     results: list[dict[str, Any]],
 ) -> None:
-    if len(_cache) >= CACHE_MAX_SIZE:
-        oldest_key = min(_cache, key=lambda k: _cache[k][0])
-        del _cache[oldest_key]
-
     key = _cache_key(query, mode, scope, limit)
-    _cache[key] = (time.monotonic(), results)
+    with _cache_lock:
+        if len(_cache) >= CACHE_MAX_SIZE:
+            oldest_key = min(_cache, key=lambda k: _cache[k][0])
+            del _cache[oldest_key]
+        _cache[key] = (time.monotonic(), results)
 
 def cache_clear() -> None:
-    _cache.clear()
+    with _cache_lock:
+        _cache.clear()
 
 def has_negation(text_a: str, text_b: str) -> bool:
     combined = f"{text_a} {text_b}"

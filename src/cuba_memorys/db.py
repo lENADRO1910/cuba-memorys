@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import os
+import random
 import re
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
 from importlib import resources
 from typing import Any
@@ -22,6 +23,18 @@ _pool: asyncpg.Pool | None = None
 _pool_lock = asyncio.Lock()
 _semaphore = asyncio.Semaphore(8)
 _pgvector_available: bool = False
+
+# F-003: Transient errors that are safe to retry
+_TRANSIENT_ERRORS = (
+    asyncpg.ConnectionDoesNotExistError,
+    asyncpg.InterfaceError,
+    asyncpg.InternalClientError,
+    ConnectionResetError,
+    OSError,
+)
+
+_MAX_RETRIES: int = 2
+_BASE_DELAY: float = 0.1
 
 def has_pgvector() -> bool:
     """Check if pgvector extension is active in the database."""
@@ -89,7 +102,7 @@ async def get_pool() -> asyncpg.Pool:
             )
 
         async def _init_connection(conn: asyncpg.Connection) -> None:
-            await conn.execute("SELECT 1")
+            await conn.execute("SET timezone TO 'UTC'")
 
         _pool = await asyncpg.create_pool(
             database_url,
@@ -128,28 +141,68 @@ async def init_schema() -> None:
 async def execute(query: str, *args: Any) -> str:
     async with _semaphore:
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.execute(query, *args)
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with pool.acquire() as conn:
+                    return await conn.execute(query, *args)
+            except _TRANSIENT_ERRORS as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = min(_BASE_DELAY * (2 ** attempt), 2.0) + random.uniform(0, 0.05)  # noqa: S311
+                logger.warning("Transient DB error (attempt %d/%d): %s",
+                              attempt + 1, _MAX_RETRIES, type(exc).__name__)
+                await asyncio.sleep(delay)
+        return ""  # unreachable, satisfies type checker
 
 async def fetchrow(query: str, *args: Any) -> dict[str, Any] | None:
     async with _semaphore:
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(query, *args)
-            return dict(row) if row else None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(query, *args)
+                    return dict(row) if row else None
+            except _TRANSIENT_ERRORS as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = min(_BASE_DELAY * (2 ** attempt), 2.0) + random.uniform(0, 0.05)  # noqa: S311
+                logger.warning("Transient DB error (attempt %d/%d): %s",
+                              attempt + 1, _MAX_RETRIES, type(exc).__name__)
+                await asyncio.sleep(delay)
+        return None  # unreachable
 
 async def fetch(query: str, *args: Any) -> list[dict[str, Any]]:
     async with _semaphore:
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(query, *args)
-            return [dict(r) for r in rows]
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(query, *args)
+                    return [dict(r) for r in rows]
+            except _TRANSIENT_ERRORS as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = min(_BASE_DELAY * (2 ** attempt), 2.0) + random.uniform(0, 0.05)  # noqa: S311
+                logger.warning("Transient DB error (attempt %d/%d): %s",
+                              attempt + 1, _MAX_RETRIES, type(exc).__name__)
+                await asyncio.sleep(delay)
+        return []  # unreachable
 
 async def fetchval(query: str, *args: Any) -> Any:
     async with _semaphore:
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.fetchval(query, *args)
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with pool.acquire() as conn:
+                    return await conn.fetchval(query, *args)
+            except _TRANSIENT_ERRORS as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = min(_BASE_DELAY * (2 ** attempt), 2.0) + random.uniform(0, 0.05)  # noqa: S311
+                logger.warning("Transient DB error (attempt %d/%d): %s",
+                              attempt + 1, _MAX_RETRIES, type(exc).__name__)
+                await asyncio.sleep(delay)
+        return None  # unreachable
 
 async def close() -> None:
     """Close the connection pool gracefully.
@@ -162,7 +215,7 @@ async def close() -> None:
     if pool is not None:
         try:
             await asyncio.wait_for(pool.close(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Pool close timed out, terminating")
             pool.terminate()
 

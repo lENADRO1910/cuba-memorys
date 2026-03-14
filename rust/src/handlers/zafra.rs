@@ -1,7 +1,10 @@
 //! Handler: cuba_zafra — Memory maintenance and consolidation.
+//!
+//! FIX R-001: safe_truncate() for UTF-8 char boundary safety.
+//! FIX R-002: merge loop wrapped in transaction for atomicity.
 
 use crate::cognitive::fsrs;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -29,12 +32,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  LIMIT 100"
             ).bind(sim_threshold).fetch_all(pool).await?;
 
+            // FIX R-002: Atomic transaction — all-or-nothing merge
+            let mut tx = pool.begin().await.context("failed to begin merge transaction")?;
             let mut merged = 0u32;
             for (keep_id, remove_id, _) in &dupes {
-                sqlx::query("UPDATE brain_observations SET observation_type = 'superseded' WHERE id = $1").bind(remove_id).execute(pool).await?;
-                sqlx::query("UPDATE brain_observations SET importance = LEAST(importance + 0.05, 1.0) WHERE id = $1").bind(keep_id).execute(pool).await?;
+                sqlx::query("UPDATE brain_observations SET observation_type = 'superseded' WHERE id = $1").bind(remove_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE brain_observations SET importance = LEAST(importance + 0.05, 1.0) WHERE id = $1").bind(keep_id).execute(&mut *tx).await?;
                 merged += 1;
             }
+            tx.commit().await.context("failed to commit merge transaction")?;
             Ok(serde_json::json!({"action": "merge", "merged": merged, "threshold": sim_threshold}))
         }
         "stats" => {
@@ -70,7 +76,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  WHERE similarity(a.content, b.content) > 0.7 AND a.observation_type != 'superseded' AND b.observation_type != 'superseded'
                  ORDER BY sim DESC LIMIT 20"
             ).fetch_all(pool).await?;
-            let results: Vec<Value> = dupes.iter().map(|(a, b, s)| serde_json::json!({"content_a": &a[..a.len().min(100)], "content_b": &b[..b.len().min(100)], "similarity": s})).collect();
+            // FIX R-001: safe_truncate prevents panic on multi-byte UTF-8
+            let results: Vec<Value> = dupes.iter().map(|(a, b, s)| serde_json::json!({
+                "content_a": safe_truncate(a, 100),
+                "content_b": safe_truncate(b, 100),
+                "similarity": s
+            })).collect();
             Ok(serde_json::json!({"action": "find_duplicates", "duplicates": results, "count": results.len()}))
         }
         "export" => {
@@ -86,4 +97,22 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         }
         _ => anyhow::bail!("Invalid action: {action}"),
     }
+}
+
+/// FIX R-001: Truncate string to max_bytes at a valid UTF-8 char boundary.
+///
+/// Rust `&str[..n]` panics if `n` is not a char boundary (e.g., slicing
+/// mid-emoji or mid-accent). This function walks backwards to find the
+/// nearest valid boundary. O(1) amortized — max 4 bytes backtrack (max
+/// UTF-8 char width).
+pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk backwards to find a valid char boundary (max 4 steps)
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }

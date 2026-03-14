@@ -4,8 +4,8 @@
 //! V10: Upsert detection — AI knows if entity was created or re-found.
 //! Hebbian: get/update auto-boost entity + neighbor importance.
 
-use crate::constants::{VALID_ENTITY_TYPES, HEBBIAN_ACCESS_BOOST, HEBBIAN_MAX_IMPORTANCE};
-use crate::cognitive::dual_strength;
+use crate::constants::VALID_ENTITY_TYPES;
+use crate::cognitive::{dual_strength, hebbian};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -230,37 +230,12 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
     }))
 }
 
-/// Boost entity importance via Hebbian learning.
+/// Boost entity importance via Hebbian learning with BCM throttling.
+///
+/// Delegates to cognitive::hebbian which applies BCM metaplastic throttling
+/// (Bienenstock-Cooper-Munro 1982) to prevent winner-take-all dynamics.
 async fn boost_entity_importance(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()> {
-    sqlx::query(
-        "UPDATE brain_entities SET
-            importance = LEAST(importance + $1, $2),
-            access_count = access_count + 1,
-            updated_at = NOW()
-         WHERE id = $3"
-    )
-    .bind(HEBBIAN_ACCESS_BOOST)
-    .bind(HEBBIAN_MAX_IMPORTANCE)
-    .bind(entity_id)
-    .execute(pool)
-    .await?;
-
-    // Boost neighbors too (spreading activation — Collins & Loftus 1975)
-    sqlx::query(
-        "UPDATE brain_entities SET
-            importance = LEAST(importance + $1 * 0.5, $2),
-            updated_at = NOW()
-         WHERE id IN (
-            SELECT CASE WHEN from_entity = $3 THEN to_entity ELSE from_entity END
-            FROM brain_relations
-            WHERE from_entity = $3 OR to_entity = $3
-         )"
-    )
-    .bind(HEBBIAN_ACCESS_BOOST)
-    .bind(HEBBIAN_MAX_IMPORTANCE)
-    .bind(entity_id)
-    .execute(pool)
-    .await?;
-
+    hebbian::boost_on_access(pool, entity_id).await?;
+    hebbian::boost_neighbors(pool, entity_id).await?;
     Ok(())
 }

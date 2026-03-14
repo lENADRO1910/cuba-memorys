@@ -11,3 +11,4 @@ venv/
 .venv/
 uv.lock
 .venv/
+rust/target/

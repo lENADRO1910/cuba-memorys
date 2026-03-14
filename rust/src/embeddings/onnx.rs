@@ -31,8 +31,8 @@ static ONNX_SESSION: OnceLock<std::sync::Mutex<Session>> = OnceLock::new();
 static TOKENIZER: OnceLock<tokenizers::Tokenizer> = OnceLock::new();
 
 enum ModelStatus {
-    /// Real ONNX model loaded at the given path.
-    Loaded(PathBuf),
+    /// Real ONNX model loaded successfully.
+    Loaded,
     /// No model — using hash-based fallback.
     Fallback,
 }
@@ -55,7 +55,7 @@ fn get_model_status() -> &'static ModelStatus {
                     match init_onnx_session(&model_file, &p) {
                         Ok(()) => {
                             tracing::info!(path = %model_file.display(), "ONNX model loaded successfully");
-                            ModelStatus::Loaded(model_file)
+                            ModelStatus::Loaded
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to load ONNX model — using fallback");
@@ -162,7 +162,7 @@ pub async fn embed(text: &str) -> Result<Vec<f32>> {
 /// deterministic hash-based fallback for testing.
 fn compute_embedding(text: &str) -> Result<Vec<f32>> {
     match get_model_status() {
-        ModelStatus::Loaded(_) => {
+        ModelStatus::Loaded => {
             compute_onnx_embedding(text)
         }
         ModelStatus::Fallback => {
@@ -308,7 +308,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Check if ONNX model is available.
 pub fn is_model_loaded() -> bool {
-    matches!(get_model_status(), ModelStatus::Loaded(_))
+    matches!(get_model_status(), ModelStatus::Loaded)
 }
 
 #[cfg(test)]
